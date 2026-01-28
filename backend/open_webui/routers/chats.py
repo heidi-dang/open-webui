@@ -1,12 +1,16 @@
 import json
 import logging
+import re
 from typing import Optional
 from sqlalchemy.orm import Session
 import asyncio
+
+import aiohttp
+import anyio
 from fastapi.responses import StreamingResponse
 
 
-from open_webui.utils.misc import get_message_list
+from open_webui.utils.misc import get_message_list, stream_chunks_handler
 from open_webui.socket.main import get_event_emitter
 from open_webui.models.chats import (
     ChatForm,
@@ -34,10 +38,102 @@ from pydantic import BaseModel
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_permission
+from open_webui.utils.executor import execute_python
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# --- Autocoder streaming helpers -------------------------------------------------
+
+CODE_BLOCK_PATTERN = re.compile(
+    r"```(?:[a-zA-Z0-9_+\-]+\n)?(.*?)```", re.DOTALL
+)
+
+
+def _extract_stream_content(payload: dict) -> str:
+    """
+    Pull incremental text content from OpenAI-style SSE payloads.
+    """
+    choices = payload.get("choices")
+    if not choices:
+        content = payload.get("content", "")
+        return content if isinstance(content, str) else ""
+
+    choice = choices[0] or {}
+    delta = choice.get("delta") or {}
+    if isinstance(delta.get("content"), str):
+        return delta["content"]
+
+    message = choice.get("message") or {}
+    if isinstance(message.get("content"), str):
+        return message["content"]
+
+    return ""
+
+
+async def autocoder_stream_handler(stream: aiohttp.StreamReader):
+    """
+    Wrap upstream chat streams, detect code blocks, execute them in the sandbox,
+    and emit workflow/testing metadata events.
+    """
+    base_stream = stream_chunks_handler(stream)
+    buffer = ""
+    last_processed_end = 0
+
+    async for line in base_stream:
+        # Forward original stream chunk first
+        yield line
+
+        if not line.startswith(b"data:"):
+            continue
+
+        payload_bytes = line[5:].strip()
+        if not payload_bytes or payload_bytes == b"[DONE]":
+            continue
+
+        try:
+            payload_json = json.loads(payload_bytes)
+        except Exception:
+            continue
+
+        content_piece = _extract_stream_content(payload_json)
+        if not content_piece:
+            continue
+
+        buffer += content_piece
+
+        for match in CODE_BLOCK_PATTERN.finditer(buffer, last_processed_end):
+            code_text = match.group(1)
+            last_processed_end = match.end()
+
+            # Notify frontend that testing starts
+            testing_signal = {"type": "workflow", "step": "testing"}
+            yield f"data: {json.dumps(testing_signal)}".encode("utf-8") + b"\n\n"
+
+            try:
+                result = await anyio.to_thread.run_sync(execute_python, code_text)
+            except Exception as err:
+                result = {
+                    "stdout": "",
+                    "stderr": f"Executor failed: {err}",
+                    "exit_code": -1,
+                }
+
+            thought_payload = {
+                "type": "workflow",
+                "step": "testing",
+                "kind": "autocoder",
+                "needs_fix": result.get("exit_code", 1) != 0,
+                "result": result,
+            }
+            yield f"data: {json.dumps(thought_payload)}".encode("utf-8") + b"\n\n"
+
+        # Prevent unbounded growth
+        if len(buffer) > 12000:
+            trim = len(buffer) - 8000
+            buffer = buffer[trim:]
+            last_processed_end = max(0, last_processed_end - trim)
 
 ############################
 # GetChatList

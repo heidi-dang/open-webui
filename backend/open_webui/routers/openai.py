@@ -44,10 +44,8 @@ from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_system_prompt_to_body,
 )
-from open_webui.utils.misc import (
-    convert_logit_bias_input_to_json,
-    stream_chunks_handler,
-)
+from open_webui.utils.misc import convert_logit_bias_input_to_json
+from open_webui.routers.chats import autocoder_stream_handler
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access
@@ -55,7 +53,6 @@ from open_webui.utils.headers import include_user_info_headers
 
 
 log = logging.getLogger(__name__)
-
 
 ##########################################
 #
@@ -952,7 +949,7 @@ async def generate_chat_completion(
         if "text/event-stream" in r.headers.get("Content-Type", ""):
             streaming = True
             return StreamingResponse(
-                stream_chunks_handler(r.content),
+                autocoder_stream_handler(r.content),
                 status_code=r.status,
                 headers=dict(r.headers),
                 background=BackgroundTask(
