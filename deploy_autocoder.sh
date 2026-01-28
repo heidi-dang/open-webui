@@ -49,9 +49,10 @@ if [ -n "${SUDO}" ]; then
 else
   warn "Skipped apt update/upgrade (no sudo)"
 fi
-section "Minimal Python deps for dry run"
+
+section "Minimal Python deps for dry run and launcher"
 if command -v pip3 >/dev/null 2>&1; then
-  ${SUDO:-} pip3 install docker --quiet || warn "pip3 install docker reported issues"
+  ${SUDO:-} pip3 install uvicorn typer docker aiohttp pydantic-settings --quiet || warn "pip3 install reported issues"
 else
   warn "pip3 not found; dry run may fail without docker module"
 fi
@@ -170,11 +171,7 @@ else
   fail "executor.py missing"
 fi
 
-ok "SYSTEM FULLY OPTIMIZED AND READY"
-
-section "Launch services"
-
-echo "Killing old instances on ports 3000 and 8080 (if any)..."
+section "Kill existing services"
 for p in 3000 8080; do
   if lsof -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
     PID=$(lsof -iTCP:"$p" -sTCP:LISTEN -t | head -n1)
@@ -186,38 +183,40 @@ done
 BACKEND_DIR="${ROOT_DIR}/backend"
 FRONTEND_DIR="${ROOT_DIR}"
 
-echo "Building frontend (npm run build)..."
+section "Frontend build"
 cd "$FRONTEND_DIR"
 npm install >/dev/null 2>&1 || warn "npm install encountered issues"
 npm run build >/dev/null 2>&1 || warn "npm run build encountered issues"
 
-echo "Starting backend..."
+section "Launch backend"
 cd "$BACKEND_DIR"
 PYTHONPATH="${PYTHONPATH:-}:${BACKEND_DIR}" nohup python3 -m open_webui.main > "${ROOT_DIR}/backend.log" 2>&1 &
 BACKEND_PID=$!
 ok "Backend started (pid $BACKEND_PID)"
 
-echo "Starting frontend..."
+section "Launch frontend"
 cd "$FRONTEND_DIR"
 nohup npm run dev -- --host 0.0.0.0 --port 3000 > "${ROOT_DIR}/frontend.log" 2>&1 &
 FRONTEND_PID=$!
 ok "Frontend started (pid $FRONTEND_PID)"
 
+section "Health check"
 echo "Waiting 10 seconds for services to come up..."
 sleep 10
 
-echo "Health checks..."
-if curl -f http://localhost:3000 >/dev/null 2>&1; then
+if curl -I http://localhost:3000 >/dev/null 2>&1; then
   ok "Frontend responding on 3000"
 else
   warn "Frontend not responding on 3000"
 fi
 
-if curl -f http://localhost:8080 >/dev/null 2>&1; then
+if curl -I http://localhost:8080 >/dev/null 2>&1; then
   ok "Backend responding on 8080"
 else
   warn "Backend not responding on 8080"
 fi
 
 echo
-echo "Access the app at: http://[YOUR_VM_IP]:3000"
+echo "OPEN WEBUI IS LIVE AT http://[YOUR_VM_IP]:3000"
+
+ok "SYSTEM FULLY OPTIMIZED AND READY"
