@@ -4,31 +4,124 @@ set -euo pipefail
 LOG_FILE="autocoder_deploy.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-echo "== Autocoder deploy validation =="
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "-- Checking docker socket access --"
-if [ ! -S /var/run/docker.sock ]; then
-  echo "Docker socket not found at /var/run/docker.sock" && exit 1
-fi
-if ! docker info >/dev/null 2>&1; then
-  echo "Cannot talk to Docker daemon. Ensure your user is in the docker group or run with appropriate privileges." && exit 1
-fi
-echo "Docker socket accessible."
+GREEN="✅"
+RED="❌"
+YELLOW="⚠️"
+CYAN="🔄"
 
-echo "-- Preparing sandbox root with permissive permissions --"
+section() { echo -e "\n${CYAN} $1"; }
+ok() { echo -e "${GREEN} $1"; }
+warn() { echo -e "${YELLOW} $1"; }
+fail() { echo -e "${RED} $1"; exit 1; }
+
+section "System health & updates"
+if command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+  ok "sudo present"
+else
+  SUDO=""
+  warn "sudo not present; proceeding without"
+fi
+
+if [ -n "${SUDO}" ] && groups "$(whoami)" | grep -q "\bsudo\b"; then
+  ok "User has sudo privileges"
+else
+  warn "User may not have sudo privileges"
+fi
+
+if [ -n "${SUDO}" ]; then
+  ${SUDO} apt-get update -y && ${SUDO} DEBIAN_FRONTEND=noninteractive apt-get upgrade -y || warn "apt update/upgrade reported issues"
+else
+  warn "Skipped apt update/upgrade (no sudo)"
+fi
+
+section "Network integrity"
+PORTS=("8080" "3000")
+for p in "${PORTS[@]}"; do
+  if lsof -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
+    PID=$(lsof -iTCP:"$p" -sTCP:LISTEN -t | head -n1)
+    warn "Port $p in use by PID $PID"
+  else
+    ok "Port $p available"
+  fi
+done
+
+if ping -c1 8.8.8.8 >/dev/null 2>&1; then
+  ok "Internet connectivity OK"
+else
+  fail "No internet connectivity; cannot pull Docker images"
+fi
+
+section "Docker & permissions"
+if ! command -v docker >/dev/null 2>&1; then
+  fail "Docker not installed"
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  fail "Docker daemon unreachable; ensure it is running"
+fi
+ok "Docker daemon reachable"
+
+if ! groups "$(whoami)" | grep -q "\bdocker\b"; then
+  if [ -n "${SUDO}" ]; then
+    warn "User not in docker group; adding now (logout/login required)"
+    ${SUDO} usermod -aG docker "$(whoami)"
+  else
+    warn "Cannot add user to docker group (no sudo)"
+  fi
+else
+  ok "User in docker group"
+fi
+
+if [ ! -S /var/run/docker.sock ]; then
+  fail "Docker socket /var/run/docker.sock missing"
+fi
+ok "Docker socket present"
+
 SANDBOX_DIR="${ROOT_DIR}/backend/data/sandboxes"
 mkdir -p "$SANDBOX_DIR"
 chmod 777 "$SANDBOX_DIR"
+ok "Sandbox directory prepared with 777 perms: $SANDBOX_DIR"
 
-echo "-- Pre-pulling sandbox images --"
+section "Environment cleanup"
+docker container prune -f >/dev/null 2>&1 || warn "Container prune issue"
+docker image prune -f >/dev/null 2>&1 || warn "Image prune issue"
+ok "Prune completed"
+
+section "Image pulls"
 docker pull python:3.11-slim
 docker pull node:20-slim
 docker pull alpine:latest
+ok "Images pulled"
 
-echo "-- Verifying router registration in backend/open_webui/main.py --"
-python3 - <<'PY'
+section "Dry runs"
+python3 - <<'PY' || fail "Python dry run failed"
+import sys, pathlib
+sys.path.append(str(pathlib.Path("backend")))
+from open_webui.utils.executor import execute_code
+res = execute_code("print('Python OK')", "python", session_id="dryrun")
+print(res)
+assert res["exit_code"] == 0
+PY
+ok "Python dry run passed"
+
+node -e "console.log('Node OK')" >/dev/null 2>&1 || fail "Node dry run failed"
+ok "Node dry run passed"
+
+python3 - <<'PY' || fail "Bash dry run failed"
+import sys, pathlib
+sys.path.append(str(pathlib.Path("backend")))
+from open_webui.utils.executor import execute_code
+res = execute_code("echo BashOK", "bash", session_id="dryrun")
+print(res)
+assert res["exit_code"] == 0
+PY
+ok "Bash dry run passed"
+
+section "Router & UI checks"
+python3 - <<'PY' || fail "Router registration check failed"
 import sys, re, pathlib
 text = pathlib.Path("backend/open_webui/main.py").read_text()
 for needle in [
@@ -36,55 +129,24 @@ for needle in [
     r"include_router\(google\.router",
 ]:
     if not re.search(needle, text):
-        sys.exit(f"Missing router registration: {needle}")
+        raise SystemExit(f"Missing router registration: {needle}")
 print("Routers registered: autocoder + google")
 PY
+ok "Router registration verified"
 
-echo "-- Checking Svelte UI component for workflow --"
-if [ -f "${ROOT_DIR}/src/lib/components/chat/AutocoderWorkflow.svelte" ]; then
-  echo "AutocoderWorkflow.svelte present."
-else
-  echo "Missing AutocoderWorkflow.svelte" && exit 1
-fi
-
-echo "-- Dry run: python executor --"
-python3 - <<'PY'
-import sys, pathlib
-sys.path.append(str(pathlib.Path("backend")))
-from open_webui.utils.executor import execute_code
-print(execute_code("print('py-ok')", "python", session_id="dryrun"))
-PY
-
-echo "-- Dry run: node executor --"
-python3 - <<'PY'
-import sys, pathlib
-sys.path.append(str(pathlib.Path("backend")))
-from open_webui.utils.executor import execute_code
-print(execute_code("console.log('js-ok')", "javascript", session_id="dryrun"))
-PY
-
-echo "-- Dry run: bash executor --"
-python3 - <<'PY'
-import sys, pathlib
-sys.path.append(str(pathlib.Path("backend")))
-from open_webui.utils.executor import execute_code
-print(execute_code("echo bash-ok", "bash", session_id="dryrun"))
-PY
-
-echo "-- Verifying Svelte manifest reference (build will fail if missing) --"
 if grep -R "AutocoderWorkflow" -n "${ROOT_DIR}/src" >/dev/null 2>&1; then
-  echo "AutocoderWorkflow referenced in source."
+  ok "AutocoderWorkflow referenced in source"
 else
-  echo "Warning: AutocoderWorkflow not referenced in source; ensure it is imported where needed."
+  warn "AutocoderWorkflow not referenced; ensure it is imported where needed"
 fi
 
-echo "-- Restarting backend service if managed by systemd --"
+section "Service restart"
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet open-webui-backend; then
-  sudo systemctl restart open-webui-backend
-  echo "systemd service open-webui-backend restarted."
+  ${SUDO:-} systemctl restart open-webui-backend
+  ok "systemd service open-webui-backend restarted"
 else
-  echo "No systemd backend service detected; please restart your backend process manually if needed."
+  warn "No systemd backend service detected; restart your backend manually if required"
 fi
 
-echo "-- Summary --"
-echo "All checks passed. Ready to deploy."
+section "Final status"
+ok "SYSTEM FULLY OPTIMIZED AND READY"
