@@ -949,7 +949,11 @@ async def generate_chat_completion(
         if "text/event-stream" in r.headers.get("Content-Type", ""):
             streaming = True
             return StreamingResponse(
-                autocoder_stream_handler(r.content),
+                autocoder_stream_handler(
+                    r.content,
+                    request=request,
+                    model_id=payload.get("model"),
+                ),
                 status_code=r.status,
                 headers=dict(r.headers),
                 background=BackgroundTask(

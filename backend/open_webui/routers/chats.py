@@ -72,14 +72,21 @@ def _extract_stream_content(payload: dict) -> str:
     return ""
 
 
-async def autocoder_stream_handler(stream: aiohttp.StreamReader):
+async def autocoder_stream_handler(
+    stream: aiohttp.StreamReader,
+    request: Request,
+    model_id: str | None = None,
+    max_fixes: int = 3,
+):
     """
     Wrap upstream chat streams, detect code blocks, execute them in the sandbox,
-    and emit workflow/testing metadata events.
+    and emit workflow/testing metadata events. On failure, automatically
+    requests a fix from the LLM (up to max_fixes attempts).
     """
     base_stream = stream_chunks_handler(stream)
     buffer = ""
     last_processed_end = 0
+    attempt = 1
 
     async for line in base_stream:
         # Forward original stream chunk first
@@ -107,33 +114,152 @@ async def autocoder_stream_handler(stream: aiohttp.StreamReader):
             code_text = match.group(1)
             last_processed_end = match.end()
 
-            # Notify frontend that testing starts
-            testing_signal = {"type": "workflow", "step": "testing"}
-            yield f"data: {json.dumps(testing_signal)}".encode("utf-8") + b"\n\n"
+            current_code = code_text
 
-            try:
-                result = await anyio.to_thread.run_sync(execute_python, code_text)
-            except Exception as err:
-                result = {
-                    "stdout": "",
-                    "stderr": f"Executor failed: {err}",
-                    "exit_code": -1,
+            while attempt <= max_fixes:
+                # Notify frontend that testing starts
+                testing_signal = {
+                    "type": "workflow",
+                    "status": "executing",
+                    "step": attempt,
+                    "kind": "autocoder",
                 }
+                yield f"data: {json.dumps(testing_signal)}".encode("utf-8") + b"\n\n"
 
-            thought_payload = {
-                "type": "workflow",
-                "step": "testing",
-                "kind": "autocoder",
-                "needs_fix": result.get("exit_code", 1) != 0,
-                "result": result,
-            }
-            yield f"data: {json.dumps(thought_payload)}".encode("utf-8") + b"\n\n"
+                try:
+                    result = await anyio.to_thread.run_sync(execute_python, current_code)
+                except Exception as err:
+                    result = {
+                        "stdout": "",
+                        "stderr": f"Executor failed: {err}",
+                        "exit_code": -1,
+                    }
+
+                needs_fix = result.get("exit_code", 1) != 0
+                outcome_payload = {
+                    "type": "workflow",
+                    "status": "completed" if not needs_fix else "failed",
+                    "step": attempt,
+                    "kind": "autocoder",
+                    "result": result,
+                }
+                yield f"data: {json.dumps(outcome_payload)}".encode("utf-8") + b"\n\n"
+
+                if not needs_fix:
+                    break
+
+                if attempt >= max_fixes:
+                    # Exceeded retry budget
+                    final_payload = {
+                        "type": "workflow",
+                        "status": "exhausted",
+                        "step": attempt,
+                        "kind": "autocoder",
+                        "result": result,
+                    }
+                    yield f"data: {json.dumps(final_payload)}".encode("utf-8") + b"\n\n"
+                    break
+
+                # Ask the LLM to fix the code using stderr context
+                fix_request_payload = {
+                    "type": "workflow",
+                    "status": "fix_request",
+                    "step": attempt,
+                    "kind": "autocoder",
+                    "stderr": result.get("stderr", ""),
+                }
+                yield f"data: {json.dumps(fix_request_payload)}".encode("utf-8") + b"\n\n"
+
+                fixed_code = await _request_fix_from_llm(
+                    request=request,
+                    model_id=model_id,
+                    code=current_code,
+                    stderr=result.get("stderr", ""),
+                )
+
+                if not fixed_code:
+                    # Could not obtain a fix; stop the loop
+                    nofix_payload = {
+                        "type": "workflow",
+                        "status": "no_fix",
+                        "step": attempt,
+                        "kind": "autocoder",
+                        "result": result,
+                    }
+                    yield f"data: {json.dumps(nofix_payload)}".encode("utf-8") + b"\n\n"
+                    break
+
+                current_code = fixed_code
+                attempt += 1
 
         # Prevent unbounded growth
         if len(buffer) > 12000:
             trim = len(buffer) - 8000
             buffer = buffer[trim:]
             last_processed_end = max(0, last_processed_end - trim)
+
+
+async def _request_fix_from_llm(
+    request: Request, model_id: str | None, code: str, stderr: str
+) -> Optional[str]:
+    """
+    Call the configured OpenAI-compatible backend to request a code fix.
+    Returns the corrected code block (string) or None if not available.
+    """
+    try:
+        base_urls = request.app.state.config.OPENAI_API_BASE_URLS
+        keys = request.app.state.config.OPENAI_API_KEYS
+        if not base_urls or not keys:
+            return None
+
+        url = f"{base_urls[0]}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {keys[0]}",
+            "Content-Type": "application/json",
+        }
+
+        prompt = (
+            "You are an Autocoder assistant. The previous code failed.\n"
+            f"Error:\n{stderr}\n\n"
+            f"Original code:\n```python\n{code}\n```\n\n"
+            "Return ONLY the fixed code inside a single Python code block (```python ... ```)."
+        )
+
+        chosen_model = (
+            model_id
+            or getattr(request.app.state.config, "OPENAI_DEFAULT_MODEL", None)
+            or request.app.state.OPENAI_MODELS.get("default", {}).get("id")
+            or "gpt-3.5-turbo"
+        )
+
+        body = {
+            "model": chosen_model,
+            "messages": [
+                {"role": "system", "content": "You fix Python code for execution."},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+            "temperature": 0,
+        }
+
+        async with aiohttp.ClientSession(trust_env=True) as session:
+            async with session.post(url, headers=headers, json=body) as resp:
+                data = await resp.json()
+                content = (
+                    data.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+                if not content:
+                    return None
+
+                # Extract first code block
+                m = CODE_BLOCK_PATTERN.search(content)
+                if m:
+                    return m.group(1)
+                return None
+    except Exception:
+        return None
 
 ############################
 # GetChatList
