@@ -49,6 +49,13 @@ else
   warn "Skipped apt update/upgrade (no sudo)"
 fi
 
+section "Minimal Python deps for dry run"
+if command -v pip3 >/dev/null 2>&1; then
+  ${SUDO:-} pip3 install docker typer pydantic --quiet || warn "pip3 install minimal deps reported issues"
+else
+  warn "pip3 not found; dry run may fail without deps"
+fi
+
 section "Network integrity"
 PORTS=("8080" "3000")
 for p in "${PORTS[@]}"; do
@@ -109,9 +116,12 @@ docker pull alpine:latest
 ok "Images pulled"
 
 section "Dry runs"
-PYTHONPATH="${PYTHONPATH:-}:." python3 - <<'PY' || fail "Python dry run failed"
-import sys, pathlib
-sys.path.append(str(pathlib.Path("backend")))
+PY_BIN="python3"
+if [ -x "${ROOT_DIR}/backend/venv/bin/python" ]; then
+  PY_BIN="${ROOT_DIR}/backend/venv/bin/python"
+fi
+
+PYTHONPATH="${PYTHONPATH:-}:${ROOT_DIR}/backend" "$PY_BIN" - <<'PY' || fail "Python dry run failed"
 from open_webui.utils.executor import execute_code
 res = execute_code("print('Python OK')", "python", session_id="dryrun")
 print(res)
@@ -122,9 +132,7 @@ ok "Python dry run passed"
 node -e "console.log('Node OK')" >/dev/null 2>&1 || fail "Node dry run failed"
 ok "Node dry run passed"
 
-PYTHONPATH="${PYTHONPATH:-}:." python3 - <<'PY' || fail "Bash dry run failed"
-import sys, pathlib
-sys.path.append(str(pathlib.Path("backend")))
+PYTHONPATH="${PYTHONPATH:-}:${ROOT_DIR}/backend" "$PY_BIN" - <<'PY' || fail "Bash dry run failed"
 from open_webui.utils.executor import execute_code
 res = execute_code("echo BashOK", "bash", session_id="dryrun")
 print(res)
