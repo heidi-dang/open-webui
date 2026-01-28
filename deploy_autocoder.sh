@@ -285,8 +285,15 @@ FRONTEND_DIR="${ROOT_DIR}"
 section "Frontend build"
 cd "$FRONTEND_DIR"
 export NODE_OPTIONS="--max-old-space-size=4096"
-npm install --force >/dev/null 2>&1 || warn "npm install --force encountered issues"
+npm set progress=false >/dev/null 2>&1 || true
+npm ci >/dev/null 2>&1 || warn "npm ci encountered issues"
 npm install vite-plugin-progress --save-dev >/dev/null 2>&1 || warn "npm install vite-plugin-progress encountered issues"
+if command -v nproc >/dev/null 2>&1; then
+  CORES=$(nproc)
+  if [ "$CORES" -gt 1 ]; then
+    export VITE_BUILD_PARALLEL="$CORES"
+  fi
+fi
 python3 - <<'PY' || warn "vite.config.ts patch failed"
 from pathlib import Path
 p = Path("vite.config.ts")
