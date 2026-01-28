@@ -58,6 +58,10 @@ def execute_code(
     session_name = session_id or "default"
     session_path = SANDBOX_ROOT / session_name
     session_path.mkdir(parents=True, exist_ok=True)
+    try:
+        session_path.chmod(0o777)
+    except Exception:
+        pass
 
     client = docker.from_env()
     container = None

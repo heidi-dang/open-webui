@@ -109,7 +109,7 @@ docker pull alpine:latest
 ok "Images pulled"
 
 section "Dry runs"
-python3 - <<'PY' || fail "Python dry run failed"
+PYTHONPATH="${PYTHONPATH:-}:." python3 - <<'PY' || fail "Python dry run failed"
 import sys, pathlib
 sys.path.append(str(pathlib.Path("backend")))
 from open_webui.utils.executor import execute_code
@@ -122,7 +122,7 @@ ok "Python dry run passed"
 node -e "console.log('Node OK')" >/dev/null 2>&1 || fail "Node dry run failed"
 ok "Node dry run passed"
 
-python3 - <<'PY' || fail "Bash dry run failed"
+PYTHONPATH="${PYTHONPATH:-}:." python3 - <<'PY' || fail "Bash dry run failed"
 import sys, pathlib
 sys.path.append(str(pathlib.Path("backend")))
 from open_webui.utils.executor import execute_code
