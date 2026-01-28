@@ -279,7 +279,9 @@ cd "$FRONTEND_DIR"
 export NODE_OPTIONS="--max-old-space-size=4096"
 npm set progress=false >/dev/null 2>&1 || true
 npm ci >/dev/null 2>&1 || warn "npm ci encountered issues"
-npm install vite-plugin-progress --save-dev >/dev/null 2>&1 || warn "npm install vite-plugin-progress encountered issues"
+if [ ! -d "node_modules/vite-plugin-progress" ]; then
+  npm install vite-plugin-progress --no-save --legacy-peer-deps >/dev/null 2>&1 || warn "npm install vite-plugin-progress encountered issues"
+fi
 if command -v nproc >/dev/null 2>&1; then
   CORES=$(nproc)
   if [ "$CORES" -gt 1 ]; then
@@ -290,17 +292,43 @@ python3 - <<'PY' || warn "vite.config.ts patch failed"
 from pathlib import Path
 p = Path("vite.config.ts")
 t = p.read_text()
-if "vite-plugin-progress" not in t:
-    t = "import progress from 'vite-plugin-progress';\n" + t
-if "progress()" not in t:
+import_line = "import progress from 'vite-plugin-progress';"
+needs_import = import_line not in t
+needs_plugin = "progress()" not in t
+
+if needs_import:
+    t = import_line + "\n" + t
+
+if needs_plugin:
     target = "plugins: [\n\t\tsveltekit(),"
     if target in t:
         t = t.replace(target, "plugins: [\n\t\tsveltekit(),\n\t\tprogress(),")
     else:
-        # fallback: insert into plugins array
         t = t.replace("plugins: [", "plugins: [\n\t\tprogress(),")
+
 p.write_text(t)
 PY
+# If plugin still missing, strip it from config to allow build
+if [ ! -d "node_modules/vite-plugin-progress" ]; then
+  python3 - <<'PY'
+from pathlib import Path
+p = Path("vite.config.ts")
+t = p.read_text()
+t = t.replace("import progress from 'vite-plugin-progress';\n", "")
+t = t.replace("progress(),\n", "")
+t = t.replace("progress()", "")
+p.write_text(t)
+print("Removed vite-plugin-progress from config (not installed)")
+PY
+fi
+
+# Skip build if already built
+if [ -f "dist/index.html" ] || [ -f "build/index.html" ]; then
+  warn "dist/build already present; skipping npm run build"
+else
+  export NODE_OPTIONS="--max-old-space-size=4096"
+  npm run build | tee "${ROOT_DIR}/frontend_build.log"
+fi
 npm run build | tee "${ROOT_DIR}/frontend_build.log"
 
 section "Launch backend"
