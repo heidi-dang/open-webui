@@ -52,7 +52,7 @@ fi
 
 section "Minimal Python deps for dry run and launcher"
 if command -v pip3 >/dev/null 2>&1; then
-  ${SUDO:-} pip3 install uvicorn typer docker aiohttp pydantic-settings --quiet || warn "pip3 install reported issues"
+  ${SUDO:-} pip3 install uvicorn typer docker aiohttp pydantic-settings sqlalchemy sqlalchemy-utils --quiet || warn "pip3 install reported issues"
 else
   warn "pip3 not found; dry run may fail without docker module"
 fi
@@ -255,14 +255,6 @@ path.write_text(text)
 print("AutocoderWorkflow injection complete")
 PY
 
-section "Service restart"
-if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet open-webui-backend; then
-  ${SUDO:-} systemctl restart open-webui-backend
-  ok "systemd service open-webui-backend restarted"
-else
-  warn "No systemd backend service detected; restart your backend manually if required"
-fi
-
 section "Final status"
 if [ -f "${ROOT_DIR}/backend/open_webui/utils/executor.py" ]; then
   ok "executor.py present"
@@ -328,8 +320,8 @@ FRONTEND_PID=$!
 ok "Frontend started (pid $FRONTEND_PID)"
 
 section "Health check"
-echo "Waiting 10 seconds for services to come up..."
-sleep 10
+echo "Waiting 20 seconds for services to come up..."
+sleep 20
 
 FE_OK=0
 BE_OK=0
