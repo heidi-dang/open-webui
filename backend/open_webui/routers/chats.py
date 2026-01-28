@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import Optional
+from typing import Optional, AsyncIterable
 from sqlalchemy.orm import Session
 import asyncio
 
@@ -54,10 +54,23 @@ CODE_BLOCK_PATTERN = re.compile(
 
 def _extract_stream_content(payload: dict) -> str:
     """
-    Pull incremental text content from OpenAI-style SSE payloads.
+    Pull incremental text content from provider SSE payloads (OpenAI, Gemini).
     """
     choices = payload.get("choices")
     if not choices:
+        # Gemini format: candidates -> content.parts[].text
+        candidates = payload.get("candidates")
+        if candidates:
+            candidate = candidates[0] or {}
+            content_obj = candidate.get("content") or {}
+            parts = content_obj.get("parts") or []
+            texts = []
+            for part in parts:
+                if isinstance(part, dict) and "text" in part:
+                    texts.append(part["text"])
+                elif hasattr(part, "text"):
+                    texts.append(part.text)
+            return "".join(texts)
         content = payload.get("content", "")
         return content if isinstance(content, str) else ""
 
@@ -74,7 +87,7 @@ def _extract_stream_content(payload: dict) -> str:
 
 
 async def autocoder_stream_handler(
-    stream: aiohttp.StreamReader,
+    stream: AsyncIterable[bytes] | aiohttp.StreamReader,
     request: Request,
     model_id: str | None = None,
     max_fixes: int = 3,
@@ -84,7 +97,11 @@ async def autocoder_stream_handler(
     and emit workflow/testing metadata events. On failure, automatically
     requests a fix from the LLM (up to max_fixes attempts).
     """
-    base_stream = stream_chunks_handler(stream)
+    base_stream: AsyncIterable[bytes]
+    if hasattr(stream, "iter_chunks"):
+        base_stream = stream_chunks_handler(stream)  # type: ignore[arg-type]
+    else:
+        base_stream = stream
     buffer = ""
     last_processed_end = 0
     attempt = 1

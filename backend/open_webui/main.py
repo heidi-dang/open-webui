@@ -93,6 +93,7 @@ from open_webui.routers import (
     users,
     utils,
     autocoder,
+    google,
     scim,
 )
 
@@ -1441,6 +1442,7 @@ app.include_router(
     evaluations.router, prefix="/api/v1/evaluations", tags=["evaluations"]
 )
 app.include_router(autocoder.router, prefix="/api/v1/autocoder", tags=["autocoder"])
+app.include_router(google.router, prefix="/api/v1/google", tags=["google"])
 app.include_router(utils.router, prefix="/api/v1/utils", tags=["utils"])
 
 # SCIM 2.0 API for identity management
