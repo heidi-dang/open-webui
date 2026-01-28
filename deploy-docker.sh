@@ -10,6 +10,12 @@ git pull origin main
 echo "Patching AutocoderWorkflow syntax..."
 sed -i 's/{\/else}/{:else}/g' src/lib/components/chat/AutocoderWorkflow.svelte || true
 
+echo "Cleaning node modules and lock for clean Docker context..."
+rm -rf node_modules package-lock.json || true
+
+export DOCKER_BUILDKIT=1
+export NODE_OPTIONS="--max-old-space-size=4096"
+
 echo "Building docker image..."
 docker build -t open-webui:heidi-dev .
 

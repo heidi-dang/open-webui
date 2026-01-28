@@ -10,7 +10,7 @@ ENV NODE_OPTIONS="--max-old-space-size=4096"
 
 # Install dependencies
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm install --legacy-peer-deps
 
 # Copy source
 COPY . .
@@ -33,7 +33,8 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends \
 COPY --from=build /app/backend /app/backend
 COPY --from=build /app/build /app/build
 
-ENV PYTHONPATH="/app/backend:${PYTHONPATH}"
+ENV PYTHONPATH="/app/backend"
+ENV PROGRESS_TYPE=plain
 
 # Install python deps
 COPY backend/requirements.txt /app/backend/requirements.txt
