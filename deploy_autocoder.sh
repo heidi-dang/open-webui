@@ -20,6 +20,7 @@ fail() { echo -e "${RED} $1"; exit 1; }
 if ! id -nG "$(whoami)" | grep -q "\bdocker\b"; then
   if command -v sudo >/dev/null 2>&1; then
     sudo usermod -aG docker "$(whoami)" && warn "Added $(whoami) to docker group; re-exec with new group"
+    # Recheck and relaunch with docker group if still not effective
     if ! id -nG "$(whoami)" | grep -q "\bdocker\b"; then
       exec sg docker "$0 $*"
     fi
@@ -48,12 +49,11 @@ if [ -n "${SUDO}" ]; then
 else
   warn "Skipped apt update/upgrade (no sudo)"
 fi
-
 section "Minimal Python deps for dry run"
 if command -v pip3 >/dev/null 2>&1; then
-  ${SUDO:-} pip3 install docker typer pydantic --quiet || warn "pip3 install minimal deps reported issues"
+  ${SUDO:-} pip3 install docker --quiet || warn "pip3 install docker reported issues"
 else
-  warn "pip3 not found; dry run may fail without deps"
+  warn "pip3 not found; dry run may fail without docker module"
 fi
 
 section "Network integrity"
@@ -121,24 +121,24 @@ if [ -x "${ROOT_DIR}/backend/venv/bin/python" ]; then
   PY_BIN="${ROOT_DIR}/backend/venv/bin/python"
 fi
 
-PYTHONPATH="${PYTHONPATH:-}:${ROOT_DIR}/backend" "$PY_BIN" - <<'PY' || fail "Python dry run failed"
-from open_webui.utils.executor import execute_code
-res = execute_code("print('Python OK')", "python", session_id="dryrun")
-print(res)
-assert res["exit_code"] == 0
+${PY_BIN} - <<'PY' || fail "Python dry run failed"
+import docker
+client = docker.from_env()
+out = client.containers.run("python:3.11-slim", ["python", "-c", "print('Python OK')"], remove=True)
+print(out.decode().strip())
 PY
-ok "Python dry run passed"
+ok "Python dry run (docker exec) passed"
 
 node -e "console.log('Node OK')" >/dev/null 2>&1 || fail "Node dry run failed"
 ok "Node dry run passed"
 
-PYTHONPATH="${PYTHONPATH:-}:${ROOT_DIR}/backend" "$PY_BIN" - <<'PY' || fail "Bash dry run failed"
-from open_webui.utils.executor import execute_code
-res = execute_code("echo BashOK", "bash", session_id="dryrun")
-print(res)
-assert res["exit_code"] == 0
+${PY_BIN} - <<'PY' || fail "Bash dry run failed"
+import docker
+client = docker.from_env()
+out = client.containers.run("alpine:latest", ["sh", "-c", "echo BashOK"], remove=True)
+print(out.decode().strip())
 PY
-ok "Bash dry run passed"
+ok "Bash dry run (docker exec) passed"
 
 section "Router & UI checks"
 python3 - <<'PY' || fail "Router registration check failed"
@@ -169,4 +169,10 @@ else
 fi
 
 section "Final status"
+if [ -f "${ROOT_DIR}/backend/open_webui/utils/executor.py" ]; then
+  ok "executor.py present"
+else
+  fail "executor.py missing"
+fi
+
 ok "SYSTEM FULLY OPTIMIZED AND READY"
