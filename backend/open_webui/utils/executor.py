@@ -1,40 +1,57 @@
 """
-Utility to run untrusted Python snippets inside an isolated Docker container.
+Utility to run untrusted code snippets inside isolated Docker containers.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict
+from typing import Dict, Tuple
 
 import docker
 from docker.errors import APIError, ContainerError, ImageNotFound, ReadTimeout
 
 logger = logging.getLogger(__name__)
 
-PYTHON_IMAGE = "python:3.11-slim"
 DEFAULT_TIMEOUT = 10  # seconds
 MEMORY_LIMIT = "128m"
 
+LANG_CONFIG: Dict[str, Tuple[str, list[str]]] = {
+    "python": ("python:3.11-slim", ["python", "-c"]),
+    "javascript": ("node:20-slim", ["node", "-e"]),
+    "js": ("node:20-slim", ["node", "-e"]),
+    "node": ("node:20-slim", ["node", "-e"]),
+    "go": ("golang:1.21-alpine", ["sh", "-c"]),
+    "bash": ("alpine:latest", ["sh", "-c"]),
+    "shell": ("alpine:latest", ["sh", "-c"]),
+}
 
-def _ensure_image(client: docker.DockerClient) -> None:
+
+def _ensure_image(client: docker.DockerClient, image: str) -> None:
     """
     Pull the base image if it is not already available locally.
     """
     try:
-        client.images.get(PYTHON_IMAGE)
+        client.images.get(image)
     except ImageNotFound:
-        client.images.pull(PYTHON_IMAGE)
+        client.images.pull(image)
 
 
-def execute_python(code: str, timeout: int = DEFAULT_TIMEOUT) -> Dict[str, str | int]:
+def execute_code(
+    code: str,
+    language: str = "python",
+    timeout: int = DEFAULT_TIMEOUT,
+) -> Dict[str, str | int]:
     """
-    Execute Python source code inside a sandboxed Docker container.
+    Execute source code inside a sandboxed Docker container.
 
-    :param code: Python code to execute.
+    :param code: Source code to execute.
+    :param language: Language tag (python, javascript, go, bash).
     :param timeout: Maximum execution time in seconds.
     :returns: dict with stdout, stderr, and exit_code.
     """
+    lang = (language or "python").lower()
+    image, base_cmd = LANG_CONFIG.get(lang, LANG_CONFIG["python"])
+
     client = docker.from_env()
     container = None
     timed_out = False
@@ -43,11 +60,27 @@ def execute_python(code: str, timeout: int = DEFAULT_TIMEOUT) -> Dict[str, str |
     exit_code: int | None = None
 
     try:
-        _ensure_image(client)
+        _ensure_image(client, image)
+
+        if lang == "go":
+            # Write code to /tmp/main.go then run it
+            runner = (
+                "cat <<'EOF' >/tmp/main.go\n"
+                f"{code}\n"
+                "EOF\n"
+                "go run /tmp/main.go"
+            )
+            cmd = ["sh", "-c", runner]
+        elif lang in {"bash", "shell"}:
+            cmd = ["sh", "-c", code]
+        elif base_cmd[-1] == "-e":
+            cmd = [*base_cmd, code]
+        else:
+            cmd = [*base_cmd, code]
 
         container = client.containers.run(
-            PYTHON_IMAGE,
-            ["python", "-c", code],
+            image,
+            cmd,
             detach=True,
             network_disabled=True,
             mem_limit=MEMORY_LIMIT,
@@ -61,8 +94,8 @@ def execute_python(code: str, timeout: int = DEFAULT_TIMEOUT) -> Dict[str, str |
             pids_limit=128,
         )
 
-        result = container.wait(timeout=timeout)
-        exit_code = result.get("StatusCode", -1)
+            result = container.wait(timeout=timeout)
+            exit_code = result.get("StatusCode", -1)
 
     except ReadTimeout:
         timed_out = True
@@ -99,6 +132,11 @@ def execute_python(code: str, timeout: int = DEFAULT_TIMEOUT) -> Dict[str, str |
                 container.remove(force=True)
             except Exception as rm_err:  # pragma: no cover - best-effort cleanup
                 logger.warning("Failed to remove container: %s", rm_err)
+        # Aggressive cleanup of exited containers to save disk space
+        try:
+            client.containers.prune(filters={"status": "exited"})
+        except Exception:  # pragma: no cover
+            pass
 
     if timed_out:
         stderr = (stderr + "\n" if stderr else "") + f"Execution timed out after {timeout}s."

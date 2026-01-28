@@ -38,7 +38,7 @@ from pydantic import BaseModel
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_permission
-from open_webui.utils.executor import execute_python
+from open_webui.utils.executor import execute_code
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +47,8 @@ router = APIRouter()
 # --- Autocoder streaming helpers -------------------------------------------------
 
 CODE_BLOCK_PATTERN = re.compile(
-    r"```(?:[a-zA-Z0-9_+\-]+\n)?(.*?)```", re.DOTALL
+    r"```(?P<lang>[a-zA-Z0-9_+\-]*)\r?\n(?P<code>.*?)```",
+    re.DOTALL,
 )
 
 
@@ -111,9 +112,11 @@ async def autocoder_stream_handler(
         buffer += content_piece
 
         for match in CODE_BLOCK_PATTERN.finditer(buffer, last_processed_end):
-            code_text = match.group(1)
+            code_text = match.group("code")
+            lang = match.group("lang").lower() if match.group("lang") else "python"
             last_processed_end = match.end()
 
+            attempt = 1
             current_code = code_text
 
             while attempt <= max_fixes:
@@ -123,11 +126,14 @@ async def autocoder_stream_handler(
                     "status": "executing",
                     "step": attempt,
                     "kind": "autocoder",
+                    "language": lang,
                 }
                 yield f"data: {json.dumps(testing_signal)}".encode("utf-8") + b"\n\n"
 
                 try:
-                    result = await anyio.to_thread.run_sync(execute_python, current_code)
+                    result = await anyio.to_thread.run_sync(
+                        execute_code, current_code, lang
+                    )
                 except Exception as err:
                     result = {
                         "stdout": "",
@@ -141,6 +147,7 @@ async def autocoder_stream_handler(
                     "status": "completed" if not needs_fix else "failed",
                     "step": attempt,
                     "kind": "autocoder",
+                    "language": lang,
                     "result": result,
                 }
                 yield f"data: {json.dumps(outcome_payload)}".encode("utf-8") + b"\n\n"
@@ -155,6 +162,7 @@ async def autocoder_stream_handler(
                         "status": "exhausted",
                         "step": attempt,
                         "kind": "autocoder",
+                        "language": lang,
                         "result": result,
                     }
                     yield f"data: {json.dumps(final_payload)}".encode("utf-8") + b"\n\n"
@@ -166,6 +174,7 @@ async def autocoder_stream_handler(
                     "status": "fix_request",
                     "step": attempt,
                     "kind": "autocoder",
+                    "language": lang,
                     "stderr": result.get("stderr", ""),
                 }
                 yield f"data: {json.dumps(fix_request_payload)}".encode("utf-8") + b"\n\n"
@@ -256,7 +265,7 @@ async def _request_fix_from_llm(
                 # Extract first code block
                 m = CODE_BLOCK_PATTERN.search(content)
                 if m:
-                    return m.group(1)
+                    return m.group("code")
                 return None
     except Exception:
         return None
