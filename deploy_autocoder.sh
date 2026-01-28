@@ -185,12 +185,13 @@ FRONTEND_DIR="${ROOT_DIR}"
 
 section "Frontend build"
 cd "$FRONTEND_DIR"
-npm install >/dev/null 2>&1 || warn "npm install encountered issues"
+export NODE_OPTIONS="--max-old-space-size=4096"
+npm install --force >/dev/null 2>&1 || warn "npm install --force encountered issues"
 npm run build >/dev/null 2>&1 || warn "npm run build encountered issues"
 
 section "Launch backend"
 cd "$BACKEND_DIR"
-PYTHONPATH="${PYTHONPATH:-}:${BACKEND_DIR}" nohup python3 -m open_webui.main > "${ROOT_DIR}/backend.log" 2>&1 &
+PYTHONPATH="${PYTHONPATH:-}:${BACKEND_DIR}" nohup python3 -m open_webui.main --host 0.0.0.0 --port 8080 > "${ROOT_DIR}/backend.log" 2>&1 &
 BACKEND_PID=$!
 ok "Backend started (pid $BACKEND_PID)"
 
@@ -204,16 +205,30 @@ section "Health check"
 echo "Waiting 10 seconds for services to come up..."
 sleep 10
 
+FE_OK=0
+BE_OK=0
 if curl -I http://localhost:3000 >/dev/null 2>&1; then
   ok "Frontend responding on 3000"
+  FE_OK=1
 else
   warn "Frontend not responding on 3000"
 fi
 
 if curl -I http://localhost:8080 >/dev/null 2>&1; then
   ok "Backend responding on 8080"
+  BE_OK=1
 else
   warn "Backend not responding on 8080"
+fi
+
+if [ "$FE_OK" -ne 1 ]; then
+  warn "Last 10 lines of frontend.log:"
+  tail -n 10 "${ROOT_DIR}/frontend.log" || true
+fi
+
+if [ "$BE_OK" -ne 1 ]; then
+  warn "Last 10 lines of backend.log:"
+  tail -n 10 "${ROOT_DIR}/backend.log" || true
 fi
 
 echo
