@@ -123,6 +123,7 @@ async def autocoder_stream_handler(
     else:
         base_stream = stream
     session_id = session_id or _infer_session_id(request)
+    sent_context_hint = False
     buffer = ""
     last_processed_end = 0
     attempt = 1
@@ -148,6 +149,18 @@ async def autocoder_stream_handler(
             continue
 
         buffer += content_piece
+
+        if not sent_context_hint:
+            context_hint = {
+                "type": "workflow",
+                "status": "context",
+                "step": 0,
+                "kind": "autocoder",
+                "language": "mixed",
+                "message": "You have a persistent /workspace. Files saved there will be available in future turns."
+            }
+            yield f"data: {json.dumps(context_hint)}".encode("utf-8") + b"\n\n"
+            sent_context_hint = True
 
         for match in CODE_BLOCK_PATTERN.finditer(buffer, last_processed_end):
             code_text = match.group("code")
@@ -1360,6 +1373,7 @@ async def send_chat_message_event_by_id(
 async def delete_chat_by_id(
     request: Request,
     id: str,
+    background_tasks: BackgroundTasks,
     user=Depends(get_verified_user),
     db: Session = Depends(get_session),
 ):
@@ -1375,7 +1389,8 @@ async def delete_chat_by_id(
                 Tags.delete_tag_by_name_and_user_id(tag, user.id, db=db)
 
         result = Chats.delete_chat_by_id(id, db=db)
-
+        if result and hasattr(request.app.state, "cleanup_sandbox"):
+            background_tasks.add_task(request.app.state.cleanup_sandbox, id)
         return result
     else:
         if not has_permission(
@@ -1397,8 +1412,8 @@ async def delete_chat_by_id(
                 Tags.delete_tag_by_name_and_user_id(tag, user.id, db=db)
 
         result = Chats.delete_chat_by_id_and_user_id(id, user.id, db=db)
-        if result:
-            delete_sandbox(id)
+        if result and hasattr(request.app.state, "cleanup_sandbox"):
+            background_tasks.add_task(request.app.state.cleanup_sandbox, id)
         return result
 
 

@@ -543,6 +543,9 @@ from open_webui.utils.redis import get_sentinels_from_env
 
 from open_webui.constants import ERROR_MESSAGES
 
+from pathlib import Path
+from shutil import rmtree
+from open_webui.utils.executor import SANDBOX_ROOT
 
 if SAFE_MODE:
     print("SAFE MODE ENABLED")
@@ -680,6 +683,17 @@ app.state.redis = None
 
 app.state.WEBUI_NAME = WEBUI_NAME
 app.state.LICENSE_METADATA = None
+
+
+def cleanup_sandbox(session_id: str):
+    if not session_id:
+        return
+    path = SANDBOX_ROOT / session_id
+    if path.exists():
+        rmtree(path, ignore_errors=True)
+
+
+app.state.cleanup_sandbox = cleanup_sandbox
 
 
 ########################################
