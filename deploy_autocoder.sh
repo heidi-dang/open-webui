@@ -326,8 +326,15 @@ fi
 if [ -f "dist/index.html" ] || [ -f "build/index.html" ]; then
   warn "dist/build already present; skipping npm run build"
 else
+  # Add temporary swap for build stability
+  SWAPFILE="/tmp/autocoder_swapfile"
+  if [ ! -f "$SWAPFILE" ]; then
+    sudo fallocate -l 2G "$SWAPFILE" && sudo chmod 600 "$SWAPFILE" && sudo mkswap "$SWAPFILE" && sudo swapon "$SWAPFILE" || warn "swap creation failed"
+  fi
   export NODE_OPTIONS="--max-old-space-size=4096"
-  npm run build | tee "${ROOT_DIR}/frontend_build.log"
+  npx vite build --logLevel info | tee "${ROOT_DIR}/frontend_build.log"
+  # Optionally keep swap enabled; remove if desired:
+  # sudo swapoff "$SWAPFILE" && sudo rm -f "$SWAPFILE"
 fi
 npm run build | tee "${ROOT_DIR}/frontend_build.log"
 
