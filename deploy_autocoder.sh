@@ -286,7 +286,23 @@ section "Frontend build"
 cd "$FRONTEND_DIR"
 export NODE_OPTIONS="--max-old-space-size=4096"
 npm install --force >/dev/null 2>&1 || warn "npm install --force encountered issues"
-npm run build >/dev/null 2>&1 || warn "npm run build encountered issues"
+npm install vite-plugin-progress --save-dev >/dev/null 2>&1 || warn "npm install vite-plugin-progress encountered issues"
+python3 - <<'PY' || warn "vite.config.ts patch failed"
+from pathlib import Path
+p = Path("vite.config.ts")
+t = p.read_text()
+if "vite-plugin-progress" not in t:
+    t = "import progress from 'vite-plugin-progress';\n" + t
+if "progress()" not in t:
+    target = "plugins: [\n\t\tsveltekit(),"
+    if target in t:
+        t = t.replace(target, "plugins: [\n\t\tsveltekit(),\n\t\tprogress(),")
+    else:
+        # fallback: insert into plugins array
+        t = t.replace("plugins: [", "plugins: [\n\t\tprogress(),")
+p.write_text(t)
+PY
+npm run build | tee "${ROOT_DIR}/frontend_build.log"
 
 section "Launch backend"
 cd "$BACKEND_DIR"
