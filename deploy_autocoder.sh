@@ -16,6 +16,18 @@ ok() { echo -e "${GREEN} $1"; }
 warn() { echo -e "${YELLOW} $1"; }
 fail() { echo -e "${RED} $1"; exit 1; }
 
+# --- Hot-reload docker group membership ----------------------------------------
+if ! id -nG "$(whoami)" | grep -q "\bdocker\b"; then
+  if command -v sudo >/dev/null 2>&1; then
+    sudo usermod -aG docker "$(whoami)" && warn "Added $(whoami) to docker group; re-exec with new group"
+    if ! id -nG "$(whoami)" | grep -q "\bdocker\b"; then
+      exec sg docker "$0 $*"
+    fi
+  else
+    warn "Cannot add user to docker group (sudo not available)"
+  fi
+fi
+
 section "System health & updates"
 if command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
