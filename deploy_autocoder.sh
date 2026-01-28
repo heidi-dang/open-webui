@@ -156,6 +156,105 @@ else
   warn "AutocoderWorkflow not referenced; ensure it is imported where needed"
 fi
 
+section "Bolt AutocoderWorkflow into UI (idempotent)"
+python3 - <<'PY' || warn "AutocoderWorkflow injection encountered issues"
+from pathlib import Path
+
+path = Path("src/lib/components/chat/Messages.svelte")
+text = path.read_text()
+
+if "AutocoderWorkflow" not in text:
+    text = text.replace("import Message from './Messages/Message.svelte';",
+                        "import Message from './Messages/Message.svelte';\nimport AutocoderWorkflow from './AutocoderWorkflow.svelte';")
+
+if "const hasWorkflow" not in text:
+    inject = """
+const hasWorkflow = (message) => {
+	if (!message) return false;
+	if (message.workflow || (message.metadata && message.metadata.workflow)) return true;
+	const c = message.content;
+	if (typeof c === 'string' && c.includes('"type":"workflow"')) return true;
+	if (Array.isArray(c)) {
+		return c.some((p) => typeof p === 'string' && p.includes('"type":"workflow"'));
+	}
+	return false;
+};
+"""
+    anchor = "const scrollToBottom = () => {"
+    if anchor in text:
+        idx = text.index(anchor)
+        end_brace = text.index("};", idx) + 2
+        text = text[:end_brace] + inject + text[end_brace:]
+
+if "AutocoderWorkflow events=" not in text:
+    old = """{#each messages as message, messageIdx (message.id)}
+\t\t\t\t\t\t<Message
+\t\t\t\t\t\t\t{chatId}
+\t\t\t\t\t\t\tbind:history
+\t\t\t\t\t\t\t{selectedModels}
+\t\t\t\t\t\t\tmessageId={message.id}
+\t\t\t\t\t\t\tidx={messageIdx}
+\t\t\t\t\t\t\t{user}
+\t\t\t\t\t\t\t{setInputText}
+\t\t\t\t\t\t\t{gotoMessage}
+\t\t\t\t\t\t\t{showPreviousMessage}
+\t\t\t\t\t\t\t{showNextMessage}
+\t\t\t\t\t\t\t{updateChat}
+\t\t\t\t\t\t\t{editMessage}
+\t\t\t\t\t\t\t{deleteMessage}
+\t\t\t\t\t\t\t{rateMessage}
+\t\t\t\t\t\t\t{actionMessage}
+\t\t\t\t\t\t\t{saveMessage}
+\t\t\t\t\t\t\t{submitMessage}
+\t\t\t\t\t\t\t{regenerateResponse}
+\t\t\t\t\t\t\t{continueResponse}
+\t\t\t\t\t\t\t{mergeResponses}
+\t\t\t\t\t\t\t{addMessages}
+\t\t\t\t\t\t\t{triggerScroll}
+\t\t\t\t\t\t\t{readOnly}
+\t\t\t\t\t\t\t{editCodeBlock}
+\t\t\t\t\t\t\t{topPadding}
+\t\t\t\t\t\t/>
+\t\t\t\t\t{/each}"""
+    new = """{#each messages as message, messageIdx (message.id)}
+\t\t\t\t\t\t<Message
+\t\t\t\t\t\t\t{chatId}
+\t\t\t\t\t\t\tbind:history
+\t\t\t\t\t\t\t{selectedModels}
+\t\t\t\t\t\t\tmessageId={message.id}
+\t\t\t\t\t\t\tidx={messageIdx}
+\t\t\t\t\t\t\t{user}
+\t\t\t\t\t\t\t{setInputText}
+\t\t\t\t\t\t\t{gotoMessage}
+\t\t\t\t\t\t\t{showPreviousMessage}
+\t\t\t\t\t\t\t{showNextMessage}
+\t\t\t\t\t\t\t{updateChat}
+\t\t\t\t\t\t\t{editMessage}
+\t\t\t\t\t\t\t{deleteMessage}
+\t\t\t\t\t\t\t{rateMessage}
+\t\t\t\t\t\t\t{actionMessage}
+\t\t\t\t\t\t\t{saveMessage}
+\t\t\t\t\t\t\t{submitMessage}
+\t\t\t\t\t\t\t{regenerateResponse}
+\t\t\t\t\t\t\t{continueResponse}
+\t\t\t\t\t\t\t{mergeResponses}
+\t\t\t\t\t\t\t{addMessages}
+\t\t\t\t\t\t\t{triggerScroll}
+\t\t\t\t\t\t\t{readOnly}
+\t\t\t\t\t\t\t{editCodeBlock}
+\t\t\t\t\t\t\t{topPadding}
+\t\t\t\t\t\t/>
+\t\t\t\t\t\t{#if hasWorkflow(message)}
+\t\t\t\t\t\t\t<AutocoderWorkflow events={message.workflow ?? message?.metadata?.workflow ?? []} />
+\t\t\t\t\t\t{/if}
+\t\t\t\t\t{/each}"""
+    if old in text:
+        text = text.replace(old, new)
+
+path.write_text(text)
+print("AutocoderWorkflow injection complete")
+PY
+
 section "Service restart"
 if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet open-webui-backend; then
   ${SUDO:-} systemctl restart open-webui-backend
@@ -191,12 +290,16 @@ npm run build >/dev/null 2>&1 || warn "npm run build encountered issues"
 
 section "Launch backend"
 cd "$BACKEND_DIR"
+BACKEND_CMD="PYTHONPATH=${PYTHONPATH:-}:${BACKEND_DIR} nohup python3 -m open_webui.main --host 0.0.0.0 --port 8080 > ${ROOT_DIR}/backend.log 2>&1 &"
+echo "Launching backend with: $BACKEND_CMD"
 PYTHONPATH="${PYTHONPATH:-}:${BACKEND_DIR}" nohup python3 -m open_webui.main --host 0.0.0.0 --port 8080 > "${ROOT_DIR}/backend.log" 2>&1 &
 BACKEND_PID=$!
 ok "Backend started (pid $BACKEND_PID)"
 
 section "Launch frontend"
 cd "$FRONTEND_DIR"
+FRONTEND_CMD="nohup npm run dev -- --host 0.0.0.0 --port 3000 > ${ROOT_DIR}/frontend.log 2>&1 &"
+echo "Launching frontend with: $FRONTEND_CMD"
 nohup npm run dev -- --host 0.0.0.0 --port 3000 > "${ROOT_DIR}/frontend.log" 2>&1 &
 FRONTEND_PID=$!
 ok "Frontend started (pid $FRONTEND_PID)"
