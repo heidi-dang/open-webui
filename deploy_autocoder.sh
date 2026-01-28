@@ -84,12 +84,7 @@ fi
 ok "Docker daemon reachable"
 
 if ! groups "$(whoami)" | grep -q "\bdocker\b"; then
-  if [ -n "${SUDO}" ]; then
-    warn "User not in docker group; adding now (logout/login required)"
-    ${SUDO} usermod -aG docker "$(whoami)"
-  else
-    warn "Cannot add user to docker group (no sudo)"
-  fi
+  warn "User still not in docker group in this shell; rerun or ensure sg re-exec applied."
 else
   ok "User in docker group"
 fi
@@ -176,3 +171,53 @@ else
 fi
 
 ok "SYSTEM FULLY OPTIMIZED AND READY"
+
+section "Launch services"
+
+echo "Killing old instances on ports 3000 and 8080 (if any)..."
+for p in 3000 8080; do
+  if lsof -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
+    PID=$(lsof -iTCP:"$p" -sTCP:LISTEN -t | head -n1)
+    warn "Killing PID $PID on port $p"
+    kill -9 "$PID" || true
+  fi
+done
+
+BACKEND_DIR="${ROOT_DIR}/backend"
+FRONTEND_DIR="${ROOT_DIR}"
+
+echo "Building frontend (npm run build)..."
+cd "$FRONTEND_DIR"
+npm install >/dev/null 2>&1 || warn "npm install encountered issues"
+npm run build >/dev/null 2>&1 || warn "npm run build encountered issues"
+
+echo "Starting backend..."
+cd "$BACKEND_DIR"
+PYTHONPATH="${PYTHONPATH:-}:${BACKEND_DIR}" nohup python3 -m open_webui.main > "${ROOT_DIR}/backend.log" 2>&1 &
+BACKEND_PID=$!
+ok "Backend started (pid $BACKEND_PID)"
+
+echo "Starting frontend..."
+cd "$FRONTEND_DIR"
+nohup npm run dev -- --host 0.0.0.0 --port 3000 > "${ROOT_DIR}/frontend.log" 2>&1 &
+FRONTEND_PID=$!
+ok "Frontend started (pid $FRONTEND_PID)"
+
+echo "Waiting 10 seconds for services to come up..."
+sleep 10
+
+echo "Health checks..."
+if curl -f http://localhost:3000 >/dev/null 2>&1; then
+  ok "Frontend responding on 3000"
+else
+  warn "Frontend not responding on 3000"
+fi
+
+if curl -f http://localhost:8080 >/dev/null 2>&1; then
+  ok "Backend responding on 8080"
+else
+  warn "Backend not responding on 8080"
+fi
+
+echo
+echo "Access the app at: http://[YOUR_VM_IP]:3000"
