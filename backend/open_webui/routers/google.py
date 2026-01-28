@@ -87,7 +87,12 @@ async def gemini_chat_completions(request: Request, body: dict, user=Depends(get
     try:
         stream = _gemini_stream(model_name, prompt)
         return StreamingResponse(
-            autocoder_stream_handler(stream, request=request, model_id=model_name),
+            autocoder_stream_handler(
+                stream,
+                request=request,
+                model_id=model_name,
+                session_id=request.headers.get("X-OpenWebUI-Chat-Id"),
+            ),
             media_type="text/event-stream",
         )
     except Exception as e:

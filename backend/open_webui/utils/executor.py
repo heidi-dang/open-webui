@@ -1,10 +1,12 @@
 """
-Utility to run untrusted code snippets inside isolated Docker containers.
+Utility to run untrusted code snippets inside isolated Docker containers,
+with per-session persistent workspaces.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Dict, Tuple
 
 import docker
@@ -14,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 10  # seconds
 MEMORY_LIMIT = "128m"
+SANDBOX_ROOT = Path("backend/data/sandboxes")
 
 LANG_CONFIG: Dict[str, Tuple[str, list[str]]] = {
     "python": ("python:3.11-slim", ["python", "-c"]),
@@ -27,9 +30,7 @@ LANG_CONFIG: Dict[str, Tuple[str, list[str]]] = {
 
 
 def _ensure_image(client: docker.DockerClient, image: str) -> None:
-    """
-    Pull the base image if it is not already available locally.
-    """
+    """Pull the base image if it is not already available locally."""
     try:
         client.images.get(image)
     except ImageNotFound:
@@ -40,17 +41,23 @@ def execute_code(
     code: str,
     language: str = "python",
     timeout: int = DEFAULT_TIMEOUT,
+    session_id: str | None = None,
 ) -> Dict[str, str | int]:
     """
-    Execute source code inside a sandboxed Docker container.
+    Execute source code inside a sandboxed Docker container with a persistent workspace.
 
     :param code: Source code to execute.
     :param language: Language tag (python, javascript, go, bash).
     :param timeout: Maximum execution time in seconds.
+    :param session_id: Stable identifier for workspace persistence.
     :returns: dict with stdout, stderr, and exit_code.
     """
     lang = (language or "python").lower()
     image, base_cmd = LANG_CONFIG.get(lang, LANG_CONFIG["python"])
+
+    session_name = session_id or "default"
+    session_path = SANDBOX_ROOT / session_name
+    session_path.mkdir(parents=True, exist_ok=True)
 
     client = docker.from_env()
     container = None
@@ -63,12 +70,11 @@ def execute_code(
         _ensure_image(client, image)
 
         if lang == "go":
-            # Write code to /tmp/main.go then run it
             runner = (
-                "cat <<'EOF' >/tmp/main.go\n"
+                "cat <<'EOF' >/workspace/main.go\n"
                 f"{code}\n"
                 "EOF\n"
-                "go run /tmp/main.go"
+                "cd /workspace && go run /workspace/main.go"
             )
             cmd = ["sh", "-c", runner]
         elif lang in {"bash", "shell"}:
@@ -92,10 +98,12 @@ def execute_code(
             user="1000:1000",
             security_opt=["no-new-privileges"],
             pids_limit=128,
+            volumes={str(session_path): {"bind": "/workspace", "mode": "rw"}},
+            working_dir="/workspace",
         )
 
-            result = container.wait(timeout=timeout)
-            exit_code = result.get("StatusCode", -1)
+        result = container.wait(timeout=timeout)
+        exit_code = result.get("StatusCode", -1)
 
     except ReadTimeout:
         timed_out = True
@@ -132,7 +140,6 @@ def execute_code(
                 container.remove(force=True)
             except Exception as rm_err:  # pragma: no cover - best-effort cleanup
                 logger.warning("Failed to remove container: %s", rm_err)
-        # Aggressive cleanup of exited containers to save disk space
         try:
             client.containers.prune(filters={"status": "exited"})
         except Exception:  # pragma: no cover

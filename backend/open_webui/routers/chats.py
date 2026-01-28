@@ -1,6 +1,8 @@
 import json
 import logging
 import re
+import shutil
+from pathlib import Path
 from typing import Optional, AsyncIterable
 from sqlalchemy.orm import Session
 import asyncio
@@ -38,7 +40,7 @@ from pydantic import BaseModel
 
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_permission
-from open_webui.utils.executor import execute_code
+from open_webui.utils.executor import execute_code, SANDBOX_ROOT
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +52,23 @@ CODE_BLOCK_PATTERN = re.compile(
     r"```(?P<lang>[a-zA-Z0-9_+\-]*)\r?\n(?P<code>.*?)```",
     re.DOTALL,
 )
+
+
+def delete_sandbox(session_id: str):
+    if not session_id:
+        return
+    path = SANDBOX_ROOT / session_id
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _infer_session_id(request: Request) -> str:
+    return (
+        request.headers.get("X-OpenWebUI-Chat-Id")
+        or request.headers.get("X-Session-Id")
+        or getattr(request.state, "chat_id", None)
+        or "default"
+    )
 
 
 def _extract_stream_content(payload: dict) -> str:
@@ -90,6 +109,7 @@ async def autocoder_stream_handler(
     stream: AsyncIterable[bytes] | aiohttp.StreamReader,
     request: Request,
     model_id: str | None = None,
+    session_id: str | None = None,
     max_fixes: int = 3,
 ):
     """
@@ -102,6 +122,7 @@ async def autocoder_stream_handler(
         base_stream = stream_chunks_handler(stream)  # type: ignore[arg-type]
     else:
         base_stream = stream
+    session_id = session_id or _infer_session_id(request)
     buffer = ""
     last_processed_end = 0
     attempt = 1
@@ -149,7 +170,7 @@ async def autocoder_stream_handler(
 
                 try:
                     result = await anyio.to_thread.run_sync(
-                        execute_code, current_code, lang
+                        execute_code, current_code, lang, 10, session_id
                     )
                 except Exception as err:
                     result = {
@@ -246,6 +267,7 @@ async def _request_fix_from_llm(
 
         prompt = (
             "You are an Autocoder assistant. The previous code failed.\n"
+            "You have a persistent workspace mounted at /workspace across runs for this session.\n"
             f"Error:\n{stderr}\n\n"
             f"Original code:\n```python\n{code}\n```\n\n"
             "Return ONLY the fixed code inside a single Python code block (```python ... ```)."
@@ -793,7 +815,15 @@ async def delete_all_user_chats(
             detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
         )
 
+    try:
+        existing = Chats.get_chats_by_user_id(user.id, db=db).items
+    except Exception:
+        existing = []
+
     result = Chats.delete_chats_by_user_id(user.id, db=db)
+    if result:
+        for chat in existing:
+            delete_sandbox(chat.id)
     return result
 
 
@@ -1367,6 +1397,8 @@ async def delete_chat_by_id(
                 Tags.delete_tag_by_name_and_user_id(tag, user.id, db=db)
 
         result = Chats.delete_chat_by_id_and_user_id(id, user.id, db=db)
+        if result:
+            delete_sandbox(id)
         return result
 
 

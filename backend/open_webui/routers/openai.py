@@ -953,6 +953,7 @@ async def generate_chat_completion(
                     r.content,
                     request=request,
                     model_id=payload.get("model"),
+                    session_id=request.headers.get("X-OpenWebUI-Chat-Id"),
                 ),
                 status_code=r.status,
                 headers=dict(r.headers),
